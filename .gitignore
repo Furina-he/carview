@@ -1,0 +1,23 @@
+# IDE
+.idea/
+*.iml
+
+# Build
+target/
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Tool configs
+.claude/
+.playwright-mcp/
+
+# Screenshots
+*.png
+
+# Logs
+*.log

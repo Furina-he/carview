@@ -1,0 +1,253 @@
+version: '3.8'
+
+services:
+  # ==================== Core Profile ====================
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: carview-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_TICK_TIME: 2000
+      ZOO_4LW_COMMANDS_WHITELIST: "srvr,ruok,mntr"
+    mem_limit: 256m
+    volumes:
+      - zk-data:/data
+      - zk-log:/datalog
+    networks:
+      - carview-net
+    profiles: ["core", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/commands/ruok || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: carview-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    user: root
+    mem_limit: 896m
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    networks:
+      - carview-net
+    profiles: ["core", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  mysql:
+    image: mysql:8.0.31
+    container_name: carview-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-carview123}
+      MYSQL_DATABASE: carview
+      MYSQL_USER: ${MYSQL_USER:-carview}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-carview123}
+    mem_limit: 640m
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-time-zone='+00:00'
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/init:/docker-entrypoint-initdb.d
+    networks:
+      - carview-net
+    profiles: ["core", "full"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-carview123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ==================== Stream Profile (Flink) ====================
+  flink-jobmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: carview-flink-jm
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1024m
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+    mem_limit: 1280m
+    command: jobmanager
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks:
+      - carview-net
+    profiles: ["stream", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  flink-taskmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: carview-flink-tm
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 1024m
+        taskmanager.numberOfTaskSlots: 4
+    mem_limit: 1024m
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    networks:
+      - carview-net
+    profiles: ["stream", "full"]
+
+  # ==================== Batch Profile (Hadoop + Spark) ====================
+  hadoop-namenode:
+    image: apache/hadoop:3
+    container_name: carview-hadoop-nn
+    hostname: hadoop-namenode
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      ENSURE_NAMENODE_DIR: /opt/hadoop/dfs/name
+    mem_limit: 512m
+    command: bash -c "hdfs namenode -format -nonInteractive 2>/dev/null; hdfs namenode"
+    volumes:
+      - hadoop-namenode-data:/opt/hadoop/dfs/name
+      - ./docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./docker/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    networks:
+      - carview-net
+    profiles: ["batch", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9870/dfshealth.html || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  hadoop-datanode:
+    image: apache/hadoop:3
+    container_name: carview-hadoop-dn
+    hostname: hadoop-datanode
+    environment:
+      HADOOP_HOME: /opt/hadoop
+    mem_limit: 768m
+    command: hdfs datanode
+    volumes:
+      - hadoop-datanode-data:/opt/hadoop/dfs/data
+      - ./docker/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./docker/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+    networks:
+      - carview-net
+    profiles: ["batch", "full"]
+
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: carview-spark-master
+    ports:
+      - "18080:8080"
+      - "7077:7077"
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      SPARK_NO_DAEMONIZE: "true"
+    mem_limit: 512m
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    networks:
+      - carview-net
+    profiles: ["batch", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: carview-spark-worker
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_CORES: 2
+      SPARK_NO_DAEMONIZE: "true"
+    mem_limit: 1024m
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - carview-net
+    profiles: ["batch", "full"]
+
+  # ==================== BI Profile (Superset) ====================
+  superset:
+    image: apache/superset:latest
+    container_name: carview-superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-carview-superset-secret-key-2024}
+      SUPERSET_LOAD_EXAMPLES: "no"
+      DATABASE_HOST: mysql
+      DATABASE_PORT: 3306
+      DATABASE_DB: carview
+      DATABASE_USER: ${MYSQL_USER:-carview}
+      DATABASE_PASSWORD: ${MYSQL_PASSWORD:-carview123}
+    mem_limit: 640m
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - superset-data:/app/superset_home
+    networks:
+      - carview-net
+    profiles: ["bi", "full"]
+
+volumes:
+  zk-data:
+  zk-log:
+  kafka-data:
+  mysql-data:
+  flink-checkpoints:
+  hadoop-namenode-data:
+  hadoop-datanode-data:
+  superset-data:
+
+networks:
+  carview-net:
+    driver: bridge

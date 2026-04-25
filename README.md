@@ -451,6 +451,62 @@ ZooKeeper 3.9 默认仅启用 `srvr` 四字命令，`ruok` 未启用。`docker-c
 
 `docker-compose.yml` 中已设置 `--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci`，SQL 初始化脚本开头也设置了 `SET NAMES utf8mb4`。
 
+### Flink / Spark 本地运行报模块访问错误（Java 17）
+
+在 IDEA 或 `java -jar` 本地运行 `CarViewFlinkJob` / `CarViewSparkBatchJob` 时，可能报以下错误之一：
+
+```
+java.lang.reflect.InaccessibleObjectException: Unable to make field ... accessible:
+module java.base does not "opens java.util" to unnamed module
+```
+
+```
+java.lang.IllegalAccessError: class org.apache.spark.storage.StorageUtils$ cannot access
+class sun.nio.ch.DirectBuffer (in module java.base) because module java.base does not
+export sun.nio.ch to unnamed module
+```
+
+**原因：** Flink 的 Kryo 序列化器和 Spark 都需要通过反射访问 JDK 内部类（`java.util`、`java.time`、`sun.nio.ch` 等），Java 9+ 模块系统默认禁止此类访问。
+
+**解决方法：** 在 IDEA Run/Debug Configurations 中给 Flink 和 Spark 的运行配置都加上 VM options。
+
+Flink 作业 (`CarViewFlinkJob`) VM options：
+
+```
+--add-opens=java.base/java.util=ALL-UNNAMED
+--add-opens=java.base/java.lang=ALL-UNNAMED
+--add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+--add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+--add-opens=java.base/java.io=ALL-UNNAMED
+--add-opens=java.base/java.net=ALL-UNNAMED
+--add-opens=java.base/java.nio=ALL-UNNAMED
+--add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+--add-opens=java.base/java.time=ALL-UNNAMED
+--add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+--add-opens=java.base/sun.security.action=ALL-UNNAMED
+--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+```
+
+Spark 作业 (`CarViewSparkBatchJob`) VM options：
+
+```
+--add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+--add-opens=java.base/java.lang=ALL-UNNAMED
+--add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+--add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+--add-opens=java.base/java.io=ALL-UNNAMED
+--add-opens=java.base/java.net=ALL-UNNAMED
+--add-opens=java.base/java.nio=ALL-UNNAMED
+--add-opens=java.base/java.util=ALL-UNNAMED
+--add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+--add-opens=java.base/sun.security.action=ALL-UNNAMED
+--add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+```
+
+提交到 Flink/Spark 集群运行时不需要这些参数（集群启动脚本已内置）。
+
 ### 端口冲突
 
 如果默认端口被占用：

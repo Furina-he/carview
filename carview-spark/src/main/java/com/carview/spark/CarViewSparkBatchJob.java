@@ -24,6 +24,8 @@ public class CarViewSparkBatchJob {
 
         SparkSession spark = SparkSession.builder()
                 .appName("CarView Offline Analysis")
+                .master(System.getProperty("spark.master", "local[*]"))
+                .config("spark.ui.enabled", "false")
                 .getOrCreate();
 
         try {
